@@ -1748,6 +1748,10 @@ void FluidSimulation::_removeDiffuseParticlesFromCells(Array3d<bool> &isRemovalC
 
 void FluidSimulation::_addNewFluidCells(GridIndexVector &cells, 
                                         vmath::vec3 velocity) {
+    
+    // here add 8 * cell.size() to _markerParticles array
+    // but later code filter cells that isn't air
+    // so the adding part may be wasted?
 
     _markerParticles.reserve((unsigned int)(_markerParticles.size() + 8*cells.size()));
     for (int i = 0; i < (int)cells.size(); i++) {
@@ -1777,6 +1781,38 @@ void FluidSimulation::_getNewFluidParticles(FluidSource *source, std::vector<vma
     int iwidth = gmax.i - gmin.i + 1;
     int jheight = gmax.j - gmin.j + 1;
     int kdepth = gmax.k - gmin.k + 1;
+
+    // Because the position of bbox, in other word, gmin, is uncertain,
+    // so for convenience, substract gmin for every GridIndex.
+    // In a sense, you normalize your GridIndex.
+    // Here, GridIndex in isInvalidCell is "normalized".
+
+    // Becuase here transfer cells from getFluidOrAirCells() to `isInvalidCell`,
+    // why the Array3d is named `isInvalidCell`
+    // but not `IsValidCell`?
+
+    // The answer is at the bottom of this function
+    // We create a particleGrid, which is a subgrid of original grid.
+    // The particleGrid indicates which cell should be added fluid particles.
+    // If we have known a cell is invalid cell, or contains marker particles,
+    // then it is no need to add fluid particles into it.
+    // So we should do two things about particleGrid
+    // 1. Disable the cell in newParticleGrid where correspond to invalid cell in original grid
+    // 2. Disable the cell in newParticleGrid where contains marker particles
+
+    // `isInvalidCell` is calculated to finish first step
+
+    // In `FluidSimulation::_updateInflowFluidSource()`, we have supplement Fluid cell
+    // where is Air cell but covered by fluid inflow
+    // Why we need to add marker particles?
+    // Bacause there may be some Fluid cells or Air cells which don't contain marker particles
+    // As the duty of inflow, marker particles should be supplemented
+
+    // But I have a question is,
+    // creating `newParticleGrid` from AABB of simulation
+    // means the inflow will check and supplement marker paticles for the area of AABB,
+    // but not the area of inflow shape.
+    // Is it desired?
     
     Array3d<bool> isInvalidCell = Array3d<bool>(iwidth, jheight, kdepth, true);
     GridIndexVector sourceCells = source->getFluidOrAirCells(_materialGrid, _dx);
@@ -1791,6 +1827,18 @@ void FluidSimulation::_getNewFluidParticles(FluidSource *source, std::vector<vma
         GridIndex(0, 0, 0), GridIndex(0, 0, 1), GridIndex(0, 1, 0), GridIndex(0, 1, 1),
         GridIndex(1, 0, 0), GridIndex(1, 0, 1), GridIndex(1, 1, 0), GridIndex(1, 1, 1)
     };
+
+    // Here create a subgrid, resolution is twice of original grid,
+    // so from original grid to subgrid, index (i, j, k) should be correspond to (2*i, 2*j, 2*k).
+    // And also need an offset, in order to access the cell between (i, j, k) and (2*i, 2*j, 2*k),
+    // such as (2*i + 1, 2*j, 2*k).
+
+    // If (i, j, k) in original grid is invalid,
+    // then (2*i, 2*j, 2*k) and its neighbors in subgrid are invalid.
+
+    // GridIndex in newParticleGrid is also "normalized".
+
+    // Disable the cell in newParticleGrid where correspond to invalid in original grid
 
     Array3d<bool> newParticleGrid = Array3d<bool>(2*iwidth, 2*jheight, 2*kdepth, true);
     GridIndex subg;
@@ -1807,6 +1855,15 @@ void FluidSimulation::_getNewFluidParticles(FluidSource *source, std::vector<vma
         }
     }
 
+    // Why normalizing GridIndex has benefit?
+    // Here is reason.
+    // If we want to find which cell in newParticleGrid contains marker particles,
+    // we need to transfrom position into GridIndex in newParticleGrid.
+    // So if all position and all GridIndex start from 0,
+    // then everything will be easy.
+
+    // Disable the cell in newParticleGrid where contains marker particles
+
     vmath::vec3 offset = Grid3d::GridIndexToPosition(gmin, _dx);
     vmath::vec3 p;
     for (unsigned int i = 0; i < _markerParticles.size(); i++) {
@@ -1816,6 +1873,8 @@ void FluidSimulation::_getNewFluidParticles(FluidSource *source, std::vector<vma
             newParticleGrid.set(subg, false);
         }
     }
+
+    // normalized position remap to world
 
     double jitter = _getMarkerParticleJitter();
     vmath::vec3 jit;
@@ -1837,6 +1896,13 @@ void FluidSimulation::_getNewFluidParticles(FluidSource *source, std::vector<vma
 
 void FluidSimulation::_updateInflowFluidSource(FluidSource *source) {
     FLUIDSIM_ASSERT(source->isInflow());
+
+    // If the covering area of fluid source have air cell,
+    // it may becuase it is first frame or fluid source is moving.
+    // Anyway, all of the covering area of fluid source should be fluid cell in this frame,
+    // so set the air cell found to be fluid cell
+
+    // this function supplement fluid cell and marker particles
 
     GridIndexVector newCells = source->getAirCells(_materialGrid, _dx);
     vmath::vec3 velocity = source->getVelocity();
@@ -1896,6 +1962,8 @@ void FluidSimulation::_updateRemovedFluidCellQueue() {
         return;
     }
 
+    // _removedFluidCellQueue -> isRemovalCell
+
     Array3d<bool> isRemovalCell(_isize, _jsize, _ksize, false);
     GridIndexVector *group;
     for (unsigned int i = 0; i < _removedFluidCellQueue.size(); i++) {
@@ -1906,6 +1974,8 @@ void FluidSimulation::_updateRemovedFluidCellQueue() {
     }
     _removedFluidCellQueue.clear();
     _removedFluidCellQueue.shrink_to_fit();
+
+    // find particles to remove in isRemovalCell
 
     std::vector<bool> isRemoved;
     isRemoved.reserve(_markerParticles.size());
